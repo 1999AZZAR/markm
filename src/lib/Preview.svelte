@@ -10,6 +10,7 @@
   import { onMount } from 'svelte';
   import { copyToClipboard, readImageDataUrl } from './neu.js';
   import { highlightCode } from './highlight.js';
+  import { applyTableRules } from './mdRules.js';
 
   // pulseTick bumps (from App) only on an on-disk auto-refresh; when it changes
   // we flash whichever rendered blocks are new vs the previous render.
@@ -28,6 +29,11 @@
   // throwOnError:false keeps a broken formula as readable source text
   // instead of exploding the whole render.
   md.use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false } });
+
+  // Table niceties: unescape harmless <br>/<ul>/<ol>/<li> (html:false would
+  // otherwise show them as literal text) + bullet-ify "- " lists in cells.
+  // Security stance unchanged: <script> etc. stay escaped (see mdRules.js).
+  applyTableRules(md);
 
   // Fenced blocks render as: wrapper > (language tag + copy button) + <pre><code>.
   // The wrapper is what the copy button anchors to, and it stays a single
