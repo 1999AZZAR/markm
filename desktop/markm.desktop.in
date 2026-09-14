@@ -7,7 +7,7 @@ Exec=@EXEC@ --path=@APPDIR@ %f
 Icon=@ICON@
 Terminal=false
 Categories=Utility;TextEditor;
-MimeType=text/markdown;text/x-markdown;
+MimeType=text/markdown;text/x-markdown;text/plain;application/json;
 Keywords=markdown;md;editor;viewer;preview;
 StartupWMClass=markm
 StartupNotify=true

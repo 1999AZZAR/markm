@@ -82,39 +82,6 @@ export async function readImageDataUrl(path) {
   }
 }
 
-/** Current window geometry, or null if unavailable. */
-export async function getWindowGeometry() {
-  if (!N) return null;
-  try {
-    const [pos, size, maximized] = await Promise.all([
-      N.window.getPosition(),
-      N.window.getSize(),
-      N.window.isMaximized(),
-    ]);
-    return { x: pos.x, y: pos.y, w: size.width, h: size.height, max: maximized };
-  } catch {
-    return null;
-  }
-}
-
-/** Restore a window geometry produced by getWindowGeometry(). */
-export async function setWindowGeometry(g) {
-  if (!N || !g) return;
-  try {
-    if (g.max) {
-      await N.window.maximize();
-      return;
-    }
-    if (await N.window.isMaximized()) await N.window.unmaximize();
-    // Size before move: some WMs clamp a move against the OLD size, so moving
-    // first can land the window somewhere else than asked.
-    await N.window.setSize({ width: g.w, height: g.h });
-    await N.window.move(g.x, g.y);
-  } catch {
-    /* window ops are best-effort — a failed restore just leaves it where it is */
-  }
-}
-
 /**
  * Drop the system title bar. The `borderless` flag in neutralino.config.json is
  * not honoured on this GTK/WebKit build (the window still comes up decorated), so
@@ -177,9 +144,10 @@ export async function writeTextFile(path, data) {
 /** Show the native "open file" dialog; returns a path or null. */
 export async function pickOpenPath() {
   if (!N) return null;
-  const entries = await N.os.showOpenDialog('Open markdown file', {
+  const entries = await N.os.showOpenDialog('Open text file', {
     filters: [
       { name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
+      { name: 'Text', extensions: ['txt', 'json', 'js', 'ts', 'py', 'sh', 'yaml', 'yml', 'xml', 'html', 'htm', 'css', 'log', 'ini', 'cfg', 'conf', 'toml', 'csv'] },
       { name: 'All files', extensions: ['*'] },
     ],
   });
@@ -193,19 +161,26 @@ export async function pickFolderPath() {
   return path || null;
 }
 
-const MD_EXT = new Set(['md', 'markdown', 'mdown', 'mkd', 'mkdn']);
+// Markdown plus common text-based formats: anything listed here shows up in
+// the sidebar and opens in-app (markdown renders rich, the rest as plain text).
+const TEXT_EXT = new Set([
+  'md', 'markdown', 'mdown', 'mkd', 'mkdn',
+  'txt', 'json', 'js', 'ts', 'py', 'sh',
+  'yaml', 'yml', 'xml', 'html', 'htm', 'css',
+  'log', 'ini', 'cfg', 'conf', 'toml', 'csv',
+]);
 
 /**
- * List markdown files directly inside a folder (non-recursive), sorted by name.
+ * List text files directly inside a folder (non-recursive), sorted by name.
  * Returns [{ name, path }]. Empty array on failure.
  */
-export async function listMarkdownFiles(dir) {
+export async function listTextFiles(dir) {
   if (!N) return [];
   try {
     const entries = await N.filesystem.readDirectory(dir);
     return entries
       .filter((e) => (e.type || '').toUpperCase() !== 'DIRECTORY')
-      .filter((e) => MD_EXT.has((e.entry.split('.').pop() || '').toLowerCase()))
+      .filter((e) => TEXT_EXT.has((e.entry.split('.').pop() || '').toLowerCase()))
       .map((e) => ({ name: e.entry, path: `${dir}/${e.entry}` }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
@@ -221,20 +196,6 @@ export async function pathStat(path) {
   } catch {
     return null;
   }
-}
-
-/**
- * Like listMarkdownFiles, but stats each entry so the chooser can sort by
- * modified time / size. modifiedAt is epoch ms (0 if it couldn't be read).
- */
-export async function listMarkdownFilesWithStats(dir) {
-  const base = await listMarkdownFiles(dir);
-  const out = [];
-  for (const f of base) {
-    const st = await pathStat(f.path);
-    out.push({ ...f, modifiedAt: st?.modifiedAt ?? 0, size: st?.size ?? 0 });
-  }
-  return out;
 }
 
 /** Open a URL or path with the OS default handler (browser, image viewer, …). */
@@ -388,19 +349,78 @@ export async function watchFile(filePath, onChange) {
 }
 
 /**
+ * Watch a whole directory and invoke `onEvent` for every filesystem event in
+ * it (file add/remove/modify/rename). The sidebar uses this to keep its file
+ * list live. Returns an async cleanup function.
+ *
+ * NOTE: Neutralino delivers every filesystem-watcher event — file watchers
+ * and directory watchers alike — as `watchFile`; there is no separate
+ * `watchDir` event. So we subscribe to `watchFile` and filter by our own
+ * watcher id, otherwise sibling watchers (e.g. the open file's watcher on
+ * the same folder) would trigger us too.
+ */
+export async function watchDirectory(dir, onEvent) {
+  if (!N || !dir) return async () => {};
+  let watcherId = null;
+  const handler = (evt) => {
+    const d = evt?.detail || {};
+    if (watcherId == null || d.id !== watcherId) return;
+    onEvent?.(d);
+  };
+  try {
+    N.events.on('watchFile', handler);
+    watcherId = await N.filesystem.createWatcher(dir);
+  } catch {
+    N.events.off('watchFile', handler);
+    return async () => {};
+  }
+  return async () => {
+    try {
+      N.events.off('watchFile', handler);
+      if (watcherId != null) await N.filesystem.removeWatcher(watcherId);
+    } catch {
+      /* non-fatal */
+    }
+  };
+}
+
+/**
  * Copy text to the system clipboard.
- * Prefers the native bridge: WebKitGTK only grants `navigator.clipboard.writeText`
- * in a secure context, which the app's file:// page isn't.
+ * Tries, in order: the native bridge, the async clipboard API (the runtime
+ * enables javascript-can-access-clipboard), then the legacy execCommand path
+ * which WebKitGTK still honours from a user gesture like this button click.
  * @returns {Promise<boolean>} whether the copy succeeded
  */
 export async function copyToClipboard(text) {
   try {
-    if (N) await N.clipboard.writeText(text);
-    else await navigator.clipboard.writeText(text);
+    if (N) {
+      await N.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* native bridge refused — fall through to the web fallbacks */
+  }
+  try {
+    await navigator.clipboard.writeText(text);
     return true;
   } catch {
-    return false;
+    /* file:// page without clipboard permission — try execCommand */
   }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (ok) return true;
+  } catch {
+    /* non-fatal */
+  }
+  return false;
 }
 
 /** Quit the application. */

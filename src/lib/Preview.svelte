@@ -1,19 +1,21 @@
 <script>
   import MarkdownIt from 'markdown-it';
   import { onMount } from 'svelte';
-  import { saveSetting, loadSetting, copyToClipboard, readImageDataUrl } from './neu.js';
+  import { copyToClipboard, readImageDataUrl } from './neu.js';
   import { highlightCode } from './highlight.js';
 
   // pulseTick bumps (from App) only on an on-disk auto-refresh; when it changes
   // we flash whichever rendered blocks are new vs the previous render.
-  // scrollKey = the open file's path; scroll position is remembered per key.
   // basePath = the open file's path; relative image srcs resolve against its dir.
-  let { source = '', onLink, pulseTick = 0, scrollKey = '', basePath = '' } = $props();
+  // plain = non-markdown text (txt, json, …): shown as-is, no markdown parsing.
+  let { source = '', plain = false, onLink, pulseTick = 0, basePath = '', scrollKey = '' } = $props();
 
   // html:false keeps raw embedded HTML inert — a viewer opening arbitrary
   // files shouldn't execute markup it was handed. linkify/typographer add the
-  // niceties people expect from a modern renderer.
-  const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
+  // niceties people expect from a modern renderer. breaks:true renders each
+  // single newline as <br>, so consecutive lines show as separate lines
+  // instead of collapsing into one long paragraph.
+  const md = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true });
 
   // Fenced blocks render as: wrapper > (language tag + copy button) + <pre><code>.
   // The wrapper is what the copy button anchors to, and it stays a single
@@ -51,6 +53,32 @@
     return defaultImage(tokens, idx, options, env, self);
   };
 
+  // Headings get GitHub-style id anchors so in-page links (#section) scroll:
+  // markdown-it emits no ids by itself, so TOC links would find nothing and
+  // silently do nothing. Duplicates get GitHub's -1, -2 suffixes.
+  function slugifyHeading(s) {
+    return s.trim().toLowerCase()
+      .replace(/[^\p{L}\p{N}\s-]/gu, '')
+      .replace(/\s/g, '-');
+  }
+  const defaultHeadingOpen = md.renderer.rules.heading_open;
+  md.renderer.rules.heading_open = (tokens, idx, options, env, self) => {
+    const inline = tokens[idx + 1];
+    if (inline && inline.type === 'inline') {
+      let slug = slugifyHeading(inline.content);
+      if (slug) {
+        env.slugCounts = env.slugCounts || {};
+        const n = env.slugCounts[slug] || 0;
+        env.slugCounts[slug] = n + 1;
+        if (n) slug += `-${n}`;
+        tokens[idx].attrSet('id', slug);
+      }
+    }
+    return defaultHeadingOpen
+      ? defaultHeadingOpen(tokens, idx, options, env, self)
+      : self.renderToken(tokens, idx, options);
+  };
+
   // Resolve a relative markdown src against the open file's directory.
   function resolvePath(src) {
     if (!src) return null;
@@ -66,9 +94,30 @@
     return '/' + out.join('/');
   }
 
-  let html = $derived(md.render(source || ''));
+  let html = $derived(plain
+    ? `<pre class="plain-text">${md.utils.escapeHtml(source || '')}</pre>`
+    : md.render(source || ''));
 
   let el; // the preview pane element
+
+  // Per-file scroll memory (session-only). Every scroll parks the pane's
+  // scrollTop under the open file's key; switching files restores it
+  // SYNCHRONOUSLY in the same frame as the render (effect below), so the
+  // first paint already shows the remembered spot — no delayed yank like a
+  // timer-based restore. Typing and auto-refresh keep the current position:
+  // only a key change triggers a restore.
+  const scrollPos = new Map();
+  let lastScrollKey = '';
+  function saveScroll() {
+    if (el && scrollKey) scrollPos.set(scrollKey, el.scrollTop);
+  }
+  $effect(() => {
+    html; // re-run whenever the rendered output changes
+    const key = scrollKey;
+    if (!el || key === lastScrollKey) return;
+    lastScrollKey = key;
+    el.scrollTop = scrollPos.get(key) ?? 0;
+  });
 
   // Inline every local image's bytes as a data: URI after each render. Cached by
   // path so a re-render (typing in Split mode, auto-refresh) doesn't re-read the
@@ -148,41 +197,6 @@
     lastPulseTick = tick;
   });
 
-  // --- Per-file scroll memory ---
-  // Store position as a RATIO (0..1) rather than px so it survives reflow from a
-  // different window width / reading-font. Restore only when the file changes
-  // (tracked via restoredKey), so typing/auto-refresh in the same file doesn't
-  // yank the view back.
-  let restoredKey = null;
-  let scrollTimer;
-  function saveScroll() {
-    if (!el || !scrollKey) return;
-    const room = el.scrollHeight - el.clientHeight;
-    saveSetting(`scroll:${scrollKey}`, String(room > 0 ? el.scrollTop / room : 0));
-  }
-  function onScroll() {
-    clearTimeout(scrollTimer);
-    scrollTimer = setTimeout(saveScroll, 200); // debounce persistence
-  }
-  async function restoreScroll(key) {
-    const ratio = parseFloat(await loadSetting(`scroll:${key}`));
-    if (!el || key !== scrollKey || !Number.isFinite(ratio)) return;
-    // Two rAFs: let the render + reading-font layout settle before measuring.
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        if (key === scrollKey) el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
-      }),
-    );
-  }
-  $effect(() => {
-    html; // re-run once the new file's content is rendered
-    const key = scrollKey;
-    if (key && key !== restoredKey) {
-      restoredKey = key;
-      restoreScroll(key);
-    }
-  });
-
   // Delegate anchor clicks up to the app: a bare <a> would navigate the webview
   // itself (blanking the app), so we always preventDefault and let App route the
   // href — external links to the browser, local .md files back into the viewer.
@@ -213,7 +227,7 @@
   }
 </script>
 
-<div class="preview markdown-body" bind:this={el} onscroll={onScroll}>
+<div class="preview markdown-body" bind:this={el} onscroll={saveScroll}>
   {@html html}
 </div>
 
@@ -223,6 +237,16 @@
     overflow: auto;
     padding: 44px 56px;
     box-sizing: border-box;
+  }
+
+  /* Plain-text files (txt, json, …): monospace, wrapped, at the reading size. */
+  .preview :global(.plain-text) {
+    margin: 0;
+    font-family: var(--mono-font, ui-monospace, monospace);
+    font-size: var(--reading-font, 17px);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* Newly-changed blocks after an auto-refresh wash with the insertion tint

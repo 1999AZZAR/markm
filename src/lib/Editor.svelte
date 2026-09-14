@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { createEditor, setEditorDoc } from './editor.js';
 
-  let { value = '', onChange } = $props();
+  let { value = '', onChange, onCursor } = $props();
 
   let el;
   let view;
@@ -19,6 +19,7 @@
         lastKnown = v;
         onChange?.(v);
       },
+      onCursor: (line, col) => onCursor?.(line, col),
     });
     return () => view?.destroy();
   });

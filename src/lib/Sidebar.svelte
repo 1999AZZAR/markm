@@ -1,9 +1,12 @@
 <script>
-  let { folderName = '', files = [], activePath = null, onSelect } = $props();
+  let { folderName = '', files = [], activePath = null, onSelect, onOpenFolder } = $props();
 </script>
 
 <aside class="sidebar">
-  <div class="head" title={folderName}>{folderName || 'No folder'}</div>
+  <div class="head">
+    <span class="name" title={folderName}>{folderName || 'No folder'}</span>
+    <button class="open" title="Open folder" aria-label="Open folder" onclick={() => onOpenFolder?.()}>Open</button>
+  </div>
   <div class="list">
     {#if files.length === 0}
       <div class="empty">No markdown files</div>
@@ -32,15 +35,37 @@
     overflow: hidden;
   }
   .head {
-    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 6px 6px 12px;
     font-size: 12px;
     font-weight: 600;
     color: var(--muted);
     border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+  .head .name {
+    flex: 1;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    user-select: none;
+  }
+  .head .open {
+    flex: none;
+    font-size: 11px;
+    font-weight: 400;
+    padding: 1px 8px;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .head .open:hover {
+    color: var(--fg);
+    border-color: var(--accent);
   }
   .list {
     flex: 1;

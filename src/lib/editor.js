@@ -41,12 +41,22 @@ const theme = EditorView.theme({
 /**
  * Create a CodeMirror editor.
  * @param {HTMLElement} parent
- * @param {{ doc?: string, onChange?: (value: string) => void }} opts
+ * @param {{ doc?: string, onChange?: (value: string) => void, onCursor?: (line: number, col: number) => void }} opts
  * @returns {EditorView}
  */
-export function createEditor(parent, { doc = '', onChange } = {}) {
+export function createEditor(parent, { doc = '', onChange, onCursor } = {}) {
+  const reportCursor = (state) => {
+    if (!onCursor) return;
+    const head = state.selection.main.head;
+    const line = state.doc.lineAt(head);
+    onCursor(line.number, head - line.from + 1);
+  };
   const listener = EditorView.updateListener.of((u) => {
     if (u.docChanged && onChange) onChange(u.state.doc.toString());
+    // Clicks, arrow keys, typing — anything moving the caret fires an update
+    // with selectionSet; doc changes remap the selection too, so report then
+    // as well to keep the status bar honest.
+    if (u.selectionSet || u.docChanged) reportCursor(u.state);
   });
 
   const state = EditorState.create({

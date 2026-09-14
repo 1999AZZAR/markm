@@ -82,12 +82,14 @@ sed -e "s|@EXEC@|$APPDIR/markm|g" -e "s|@APPDIR@|$APPDIR|g" -e "s|@ICON@|markm|g
   "$REPO_DIR/desktop/markm.desktop.in" > "$APPS/markm.desktop"
 chmod 644 "$APPS/markm.desktop"
 
-# Refresh caches and register as the default markdown handler.
+# Refresh caches and register as the default markdown/text handler.
 update-mime-database "$PREFIX/share/mime" 2>/dev/null || true
 update-desktop-database "$APPS" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 xdg-mime default markm.desktop text/markdown 2>/dev/null || true
 xdg-mime default markm.desktop text/x-markdown 2>/dev/null || true
+xdg-mime default markm.desktop text/plain 2>/dev/null || true
+xdg-mime default markm.desktop application/json 2>/dev/null || true
 
 echo "Installed markm -> $APPDIR"
 echo "Registered as the default handler for markdown files."

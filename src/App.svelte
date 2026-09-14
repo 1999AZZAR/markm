@@ -4,20 +4,20 @@
   import Preview from './lib/Preview.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import DiffView from './lib/DiffView.svelte';
-  import Chooser from './lib/Chooser.svelte';
   import { THEMES, DEFAULT_THEME, applyTheme } from './lib/themes.js';
   import { FONTS, DEFAULT_FONT, applyFont } from './lib/fonts.js';
   import {
     initNative, launchFilePath, readTextFile, writeTextFile,
     pickOpenPath, pickSavePath, saveSetting, loadSetting, setWindowTitle,
-    pickFolderPath, listMarkdownFiles, revealInFileManager,
+    pickFolderPath, listTextFiles, revealInFileManager,
     gitIsTracked, gitHeadContent, watchFile, exitApp,
-    pathStat, listMarkdownFilesWithStats, openExternal,
-    getWindowGeometry, setWindowGeometry,
-    minimizeWindow, toggleMaximizeWindow, makeDragRegion, setBorderless,
+    pathStat, openExternal, watchDirectory,
+    toggleMaximizeWindow, makeDragRegion, setBorderless,
   } from './lib/neu.js';
 
   const MD_RE = /\.(md|markdown|mdown|mkd|mkdn)$/i;
+  // Everything markm opens in-app: markdown renders rich, the rest as plain text.
+  const TEXT_RE = /\.(md|markdown|mdown|mkd|mkdn|txt|json|js|ts|py|sh|ya?ml|xml|html?|css|log|ini|cfg|conf|toml|csv)$/i;
 
   const WELCOME = `# Welcome to markm
 
@@ -26,9 +26,10 @@ A fast, native markdown viewer with an **edit mode** and lots of themes.
 ## Try it
 
 - Toggle **View / Edit / Split** with the icon switch in the toolbar
+- Pick another file from the **☰ sidebar** on the left — it mirrors the folder live
 - Switch the **theme** and **reading font** in the **☰ menu** on the right — everything restyles live
-- Hit **Browse** to pick another file from this folder (or \`xdg-open file.md\` / \`markm .\` once installed)
-- Links are clickable — external ones open in your browser, local \`.md\` files open here
+- Open any file with \`xdg-open file.md\`, \`markm file.md\`, or a whole folder with \`markm .\`
+- Links are clickable — external ones open in your browser, local text files open here
 
 New to markdown? Start with the
 [CommonMark reference](https://commonmark.org/help/) or
@@ -75,21 +76,30 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   let sidebarOpen = $state(false);
   let gitTracked = $state(false);
   let previousContent = $state(null); // file content at HEAD (for the diff view)
-  let chooserOpen = $state(false); // directory-launch markdown picker
-  let chooserDir = $state('');
-  let chooserFiles = $state([]);
-  let rememberGeometry = $state(true); // per-file window size/position memory
   let settingsOpen = $state(false); // appearance menu (font + theme) popover
   let settingsEl = $state(null); // popover root, so an outside click can close it
   let dragLeftEl = $state(null); // toolbar fillers that drag the borderless window
   let dragRightEl = $state(null);
+  let dragDepth = $state(0); // file-drag hover counter; overlay shows while > 0
+  let cursorLine = $state(1); // caret position in the editor (edit/split modes)
+  let cursorCol = $state(1);
 
   let fileName = $derived(filePath ? filePath.split('/').pop() : 'untitled.md');
+  // Non-markdown files render as plain text instead of going through markdown-it.
+  let isPlain = $derived(filePath ? !MD_RE.test(filePath) : false);
   let folderName = $derived(folderPath ? folderPath.split('/').pop() : '');
+
+  // Document stats for the status bar. An empty buffer still counts as 1 line
+  // (that's where the caret sits); words ignore leading/trailing whitespace.
+  let lineCount = $derived(content === '' ? 1 : content.split('\n').length);
+  let wordCount = $derived(content.trim() === '' ? 0 : content.trim().split(/\s+/).length);
+  let charCount = $derived(content.length);
 
   // Active file-watcher cleanup + the pulse-reset timer (plain vars, not state).
   let disposeWatcher = null;
   let reloadTimer = null;
+  let disposeFolderWatcher = null; // live sidebar listing for folderPath
+  let folderTimer = null; // debounce for watcher-event bursts
 
   // Keep the OS window title in sync with the open file + dirty state.
   $effect(() => {
@@ -112,32 +122,26 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     const savedMode = await loadSetting('mode');
     if (savedMode) mode = savedMode;
 
-    // Per-file window geometry defaults ON; only an explicit '0' turns it off.
-    rememberGeometry = (await loadSetting('rememberGeometry')) !== '0';
-
     const savedZoom = parseFloat(await loadSetting('zoom'));
     applyZoom(Number.isFinite(savedZoom) ? savedZoom : 1);
 
     // Restore the folder + sidebar. The sidebar stays hidden on startup unless
     // it was open last session ("unless previously").
     const savedFolder = await loadSetting('folder');
-    if (savedFolder) {
-      folderPath = savedFolder;
-      folderFiles = await listMarkdownFiles(savedFolder);
-    }
+    if (savedFolder) await setFolder(savedFolder);
     sidebarOpen = (await loadSetting('sidebarOpen')) === '1' && !!folderPath;
 
     // If launched with a path (xdg-open / file manager / CLI arg): a directory
-    // (e.g. `markm .` or `markm /tmp`) opens the picker; a file opens directly.
+    // (e.g. `markm .` or `markm /tmp`) becomes the sidebar folder; a file
+    // opens directly (and adopts its folder when none is set yet).
     const launch = launchFilePath();
     if (launch) {
       const st = await pathStat(launch);
-      if (st?.isDirectory) await openChooser(launch);
+      if (st?.isDirectory) await setFolder(launch, true);
       else await openPath(launch);
     }
-    if (!filePath && !chooserOpen) content = WELCOME;
+    if (!filePath) content = WELCOME;
 
-    watchGeometry();
     // Drag + double-click-to-maximize are window gestures on empty chrome, not
     // controls, so they're bound imperatively (as a <div> with a dblclick handler
     // is an a11y smell — there is nothing here for a keyboard user to reach).
@@ -154,34 +158,55 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     applyZoom(zoom + (e.deltaY < 0 ? -0.1 : 0.1));
   }
 
-  // Show the markdown picker for a directory. Also primes the folder sidebar so
-  // switching files stays available after a pick.
-  async function openChooser(dir) {
-    chooserDir = dir;
-    chooserFiles = await listMarkdownFilesWithStats(dir);
-    folderPath = dir;
-    folderFiles = await listMarkdownFiles(dir);
-    chooserOpen = true;
+  // --- Folder sidebar: live listing ---
+  // The sidebar always mirrors the folder on disk. A Neutralino directory
+  // watcher refreshes the listing on every add/remove/rename, a window-focus
+  // refresh catches anything the watcher missed, and file ops (open/save/drop)
+  // refresh explicitly. Opening a file adopts its directory,
+  // so the sidebar follows your files until you pick a folder.
+  async function refreshFolder() {
+    if (folderPath) folderFiles = await listTextFiles(folderPath);
   }
 
-  async function pickFromChooser(path) {
-    chooserOpen = false;
-    await openPath(path);
+  function scheduleFolderRefresh() {
+    if (folderTimer) clearTimeout(folderTimer);
+    folderTimer = setTimeout(() => { folderTimer = null; refreshFolder(); }, 300);
+  }
+
+  async function armFolderWatcher() {
+    if (disposeFolderWatcher) { await disposeFolderWatcher(); disposeFolderWatcher = null; }
+    if (folderPath) disposeFolderWatcher = await watchDirectory(folderPath, scheduleFolderRefresh);
+  }
+
+  async function setFolder(dir, open = false) {
+    if (dir === folderPath) { if (open) setSidebar(true); return; }
+    folderPath = dir;
+    saveSetting('folder', dir);
+    await refreshFolder();
+    await armFolderWatcher();
+    if (open) setSidebar(true);
+  }
+
+  // The sidebar always follows the opened file: opening a file anywhere
+  // moves the sidebar to that file's directory.
+  function adoptFolderFor(path) {
+    if (!path) return;
+    const dir = path.slice(0, path.lastIndexOf('/'));
+    if (dir && dir !== folderPath) setFolder(dir);
   }
 
   onDestroy(() => {
     if (reloadTimer) clearTimeout(reloadTimer);
-    if (geometryTimer) clearInterval(geometryTimer);
+    if (folderTimer) clearTimeout(folderTimer);
     if (disposeWatcher) disposeWatcher();
+    if (disposeFolderWatcher) disposeFolderWatcher();
   });
 
+  // Native folder dialog → the sidebar shows that folder from now on.
   async function openFolder() {
     const dir = await pickFolderPath();
     if (!dir) return;
-    folderPath = dir;
-    folderFiles = await listMarkdownFiles(dir);
-    setSidebar(true);
-    saveSetting('folder', dir);
+    await setFolder(dir, true);
   }
 
   function setSidebar(open) {
@@ -249,66 +274,15 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   async function openPath(path) {
     const text = await readTextFile(path);
     if (text === null) return;
-    await saveGeometry(); // bank the outgoing file's window before switching
     content = text;
     filePath = path;
     dirty = false;
-    await restoreGeometry(path);
+    cursorLine = 1;
+    cursorCol = 1;
     await refreshGit();
     await armWatcher(path);
-  }
-
-  // --- Per-file window geometry ---
-  // Same idea as the per-file scroll memory: a file reopens at the size and place
-  // you last read it at. Neutralino fires no move/resize event, so the geometry is
-  // polled and persisted only when it actually changed (writes are rare in
-  // practice — the window sits still while you read).
-  let lastGeometry = null;
-  let geometryKey = null; // the file `lastGeometry` belongs to
-  let geometryTimer = null;
-
-  function toggleRememberGeometry(on) {
-    rememberGeometry = on;
-    saveSetting('rememberGeometry', on ? '1' : '0');
-  }
-
-  async function saveGeometry() {
-    if (!rememberGeometry || !geometryKey || !lastGeometry) return;
-    saveSetting(`geom:${geometryKey}`, JSON.stringify(lastGeometry));
-  }
-
-  async function restoreGeometry(path) {
-    geometryKey = path;
-    lastGeometry = null; // don't let the previous file's geometry be written under this key
-    if (!rememberGeometry) return;
-    const saved = await loadSetting(`geom:${path}`);
-    if (saved) {
-      try {
-        await setWindowGeometry(JSON.parse(saved));
-      } catch {
-        /* a corrupt entry just means "no memory for this file" */
-      }
-    }
-    lastGeometry = await getWindowGeometry();
-    // Record on first sight too, so a file always has a remembered geometry — not
-    // only once you happen to move or resize its window.
-    await saveGeometry();
-  }
-
-  function watchGeometry() {
-    geometryTimer = setInterval(async () => {
-      if (!rememberGeometry || !geometryKey) return;
-      const g = await getWindowGeometry();
-      if (!g || !lastGeometry) {
-        lastGeometry = g;
-        return;
-      }
-      const moved = g.x !== lastGeometry.x || g.y !== lastGeometry.y
-        || g.w !== lastGeometry.w || g.h !== lastGeometry.h || g.max !== lastGeometry.max;
-      if (!moved) return;
-      lastGeometry = g;
-      saveSetting(`geom:${geometryKey}`, JSON.stringify(g));
-    }, 1500);
+    adoptFolderFor(path);
+    await refreshFolder();
   }
 
   // (Re)install the on-disk watcher for the open file. Tears down any previous
@@ -356,27 +330,6 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     if (path) await openPath(path);
   }
 
-  // "Browse" = the picker, opened on the folder that holds the current document
-  // (falling back to the last-used folder), with that document preselected. It
-  // replaces the old Open + Folder buttons: the picker itself can jump to any
-  // other folder, and the native open dialog stays reachable from there.
-  async function browse() {
-    const dir = filePath ? filePath.slice(0, filePath.lastIndexOf('/')) : folderPath;
-    if (!dir) {
-      await openFolder();
-      return;
-    }
-    await openChooser(dir);
-  }
-
-  // Switch the picker to another folder via the native folder dialog.
-  async function browseFolder() {
-    const dir = await pickFolderPath();
-    if (!dir) return;
-    saveSetting('folder', dir);
-    await openChooser(dir);
-  }
-
   async function save() {
     let path = filePath;
     if (!path) {
@@ -387,12 +340,19 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     if (ok) {
       filePath = path;
       dirty = false;
+      adoptFolderFor(path); // a first save into a folder adopts it for the sidebar
+      await refreshFolder(); // a new filename appears in the listing
     }
   }
 
   function onEditorChange(v) {
     content = v;
     dirty = true;
+  }
+
+  function onEditorCursor(line, col) {
+    cursorLine = line;
+    cursorCol = col;
   }
 
   // Route a clicked preview link. External URLs go to the system browser;
@@ -408,8 +368,8 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     }
     const abs = resolveLocal(href);
     const st = await pathStat(abs);
-    if (st?.isDirectory) { await openChooser(abs); return; }
-    if (MD_RE.test(abs)) { await openPath(abs); return; }
+    if (st?.isDirectory) { await setFolder(abs, true); return; }
+    if (TEXT_RE.test(abs)) { await openPath(abs); return; }
     openExternal(abs); // images, PDFs, etc.
   }
 
@@ -436,13 +396,81 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     return '/' + out.join('/');
   }
 
+  // File drag-and-drop. File managers offer the path as text/uri-list
+  // (file:///abs/path.md); a dropped directory opens the picker, a dropped
+  // markdown file opens directly. Anything else is ignored.
+  //
+  // WebKitGTK doesn't always list 'Files' in dataTransfer.types, so the
+  // dragover/drop handlers preventDefault UNCONDITIONALLY (capture phase):
+  // a single missed preventDefault lets WebKit navigate the whole window to
+  // the dropped file, killing the app. Only the overlay + open logic are
+  // gated on the drag looking like a file drag.
+  function hasFileDrag(e) {
+    const t = [...(e.dataTransfer?.types || [])].map((x) => String(x).toLowerCase());
+    return t.includes('files') || t.includes('text/uri-list');
+  }
+  function onDragEnter(e) {
+    if (!hasFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth++;
+  }
+  function onDragOver(e) {
+    e.preventDefault();
+    if (e.dataTransfer && hasFileDrag(e)) e.dataTransfer.dropEffect = 'copy';
+  }
+  function onDragLeave(e) {
+    if (!hasFileDrag(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+  function onDragEnd() {
+    dragDepth = 0; // Esc-cancelled (or otherwise aborted) drags
+  }
+  function dropFilePath(e) {
+    const dt = e.dataTransfer;
+    const get = (fmt) => { try { return dt?.getData(fmt) || ''; } catch { return ''; } };
+    // 1. Standard URI list (most file managers).
+    for (const line of get('text/uri-list').split(/\r?\n/)) {
+      const p = cleanDropUrl(line);
+      if (p) return p;
+    }
+    // 2. WebKitGTK quirk: Dolphin drops expose the file:// URL only inside a
+    // text/html anchor — strip the tags and fish the URL out.
+    const htmlText = get('text/html').replace(/<[^>]*>/g, ' ');
+    for (const token of htmlText.split(/\s+/)) {
+      const p = cleanDropUrl(token);
+      if (p) return p;
+    }
+    // 3. Plain-text fallback (a dragged path or file:// URL).
+    const p = cleanDropUrl(get('text/plain'));
+    if (p) return p;
+    return dt?.files?.[0]?.path || null; // Chromium-style fallback
+  }
+  // A file:// URL or absolute path → normalized absolute path, else null.
+  function cleanDropUrl(s) {
+    let p = (s || '').trim();
+    if (!p || p.startsWith('#')) return null;
+    try { p = decodeURI(p); } catch { /* leave as-is */ }
+    if (p.startsWith('file://')) p = p.slice(7);
+    p = p.split(/[?#]/)[0].trim();
+    return p.startsWith('/') ? normalizePath(p) : null;
+  }
+  async function onDrop(e) {
+    // Capture phase: runs before any in-app (e.g. editor) drop handling.
+    e.preventDefault();
+    dragDepth = 0;
+    if (hasFileDrag(e)) e.stopPropagation(); // don't also insert into the editor
+    const p = dropFilePath(e);
+    if (!p) return;
+    const st = await pathStat(p);
+    if (st?.isDirectory) { await setFolder(p, true); return; }
+    if (TEXT_RE.test(p)) await openPath(p);
+  }
+
   function onKey(e) {
-    // Esc closes the picker if it's open; otherwise it quits, but only in
-    // read-only View mode — never mid-edit, so an errant Esc while typing (or in
-    // Split/Diff) can't discard work by closing.
+    // Esc quits, but only in read-only View mode — never mid-edit, so an
+    // errant Esc while typing (or in Split/Diff) can't discard work by closing.
     if (e.key === 'Escape') {
       if (settingsOpen) { e.preventDefault(); settingsOpen = false; return; }
-      if (chooserOpen) { e.preventDefault(); chooserOpen = false; return; }
       if (mode === 'view') { e.preventDefault(); exitApp(); return; }
     }
     const mod = e.ctrlKey || e.metaKey;
@@ -459,11 +487,20 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
 
 <svelte:window
   on:keydown={onKey}
+  on:focus={refreshFolder}
   on:wheel|nonpassive={onWheel}
+  on:dragenter={onDragEnter}
+  on:dragover|capture={onDragOver}
+  on:dragleave={onDragLeave}
+  on:dragend={onDragEnd}
+  on:drop|capture={onDrop}
   on:click={(e) => { if (settingsOpen && !settingsEl?.contains(e.target)) settingsOpen = false; }}
 />
 
 <div class="app">
+  {#if dragDepth > 0}
+    <div class="drop-hint" aria-hidden="true"><span>Drop to open</span></div>
+  {/if}
   <header class="toolbar">
     <button
       class="icon"
@@ -515,11 +552,6 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     <div class="drag" bind:this={dragRightEl}></div>
 
     <div class="actions">
-      <div class="zoom" role="group" aria-label="Zoom">
-        <button aria-label="Zoom out" onclick={() => applyZoom(zoom - 0.1)}>−</button>
-        <button class="zoom-level" title="Reset zoom" onclick={() => applyZoom(1)}>{Math.round(zoom * 100)}%</button>
-        <button aria-label="Zoom in" onclick={() => applyZoom(zoom + 0.1)}>+</button>
-      </div>
       <div class="settings" bind:this={settingsEl}>
         <button
           class="icon"
@@ -555,65 +587,44 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
                 {/each}
               </select>
             </label>
-            <label class="check">
-              <input
-                type="checkbox"
-                checked={rememberGeometry}
-                onchange={(e) => toggleRememberGeometry(e.currentTarget.checked)}
-              />
-              <span>Remember window size per file</span>
-            </label>
           </div>
         {/if}
       </div>
-      <button onclick={browse}>Browse</button>
       <button class="primary" onclick={save}>Save</button>
-
-      <!-- Window controls, since there is no system title bar to provide them. -->
-      <div class="wctl">
-        <button class="icon" title="Minimize" aria-label="Minimize" onclick={minimizeWindow}>–</button>
-        <button class="icon" title="Maximize / restore" aria-label="Maximize or restore" onclick={toggleMaximizeWindow}>▢</button>
-        <button class="icon close" title="Close" aria-label="Close" onclick={exitApp}>✕</button>
-      </div>
     </div>
   </header>
 
   <div class="workspace">
     <div id="zoom-surface" class="zoom-surface">
       {#if sidebarOpen}
-        <Sidebar {folderName} files={folderFiles} activePath={filePath} onSelect={openPath} />
+        <Sidebar {folderName} files={folderFiles} activePath={filePath} onSelect={openPath} onOpenFolder={openFolder} />
       {/if}
-      <main class="body" class:split={mode === 'split' && !chooserOpen}>
-        {#if chooserOpen}
-          <section class="pane">
-            <Chooser
-              dir={chooserDir}
-              files={chooserFiles}
-              activePath={filePath || ''}
-              onPick={pickFromChooser}
-              onClose={() => (chooserOpen = false)}
-              onChangeFolder={browseFolder}
-            />
-          </section>
-        {:else if mode === 'diff'}
+      <main class="body" class:split={mode === 'split'}>
+        {#if mode === 'diff'}
           <section class="pane">
             <DiffView previous={previousContent} current={content} />
           </section>
         {:else}
           {#if mode === 'edit' || mode === 'split'}
             <section class="pane editor-pane">
-              <Editor value={content} onChange={onEditorChange} />
+              <Editor value={content} onChange={onEditorChange} onCursor={onEditorCursor} />
             </section>
           {/if}
           {#if mode === 'view' || mode === 'split'}
             <section class="pane preview-pane">
-              <Preview source={content} {onLink} pulseTick={refreshTick} scrollKey={filePath || ''} basePath={filePath || ''} />
+              <Preview source={content} plain={isPlain} {onLink} pulseTick={refreshTick} basePath={filePath || ''} scrollKey={filePath || ''} />
             </section>
           {/if}
         {/if}
       </main>
     </div>
   </div>
+  <footer class="statusbar">
+    <span class="stats">{lineCount} lines · {wordCount} words · {charCount} chars</span>
+    {#if mode === 'edit' || mode === 'split'}
+      <span class="cursor">{cursorLine}:{cursorCol}</span>
+    {/if}
+  </footer>
 </div>
 
 <style>
@@ -733,30 +744,6 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     justify-content: flex-end;
   }
 
-  .wctl {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    margin-left: 4px;
-    padding-left: 8px;
-    border-left: 1px solid var(--border);
-  }
-  .wctl button {
-    border-color: transparent;
-    background: transparent;
-    color: var(--muted);
-    padding: 0 8px;
-  }
-  .wctl button:hover {
-    color: var(--fg);
-    border-color: var(--border);
-  }
-  .wctl .close:hover {
-    background: #e5484d;
-    border-color: #e5484d;
-    color: #fff;
-  }
-
   .settings {
     position: relative;
     flex: none;
@@ -786,18 +773,6 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   .menu select {
     min-width: 130px;
   }
-  .menu label.check {
-    justify-content: flex-start;
-    gap: 8px;
-    padding-top: 2px;
-    border-top: 1px solid var(--border);
-    margin-top: 2px;
-    cursor: pointer;
-  }
-  .menu label.check input {
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
 
   /* All toolbar controls share one height so buttons and the native select
      line up exactly. */
@@ -816,8 +791,7 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     cursor: pointer;
   }
 
-  .modes,
-  .zoom {
+  .modes {
     display: flex;
     align-items: stretch;
     height: 26px;
@@ -826,8 +800,7 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     border-radius: 6px;
     overflow: hidden;
   }
-  .modes button,
-  .zoom button {
+  .modes button {
     height: 100%;
     border: none;
     border-radius: 0;
@@ -848,23 +821,30 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     stroke-linejoin: round;
   }
   .modes button:last-child { border-right: none; }
-  .zoom button { padding: 0 10px; }
-  .zoom .zoom-level {
-    min-width: 46px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--muted);
-    border-left: 1px solid var(--border);
-    border-right: 1px solid var(--border);
-    font-variant-numeric: tabular-nums;
-  }
   button:hover,
   select:hover { border-color: var(--accent); }
   button.primary {
     background: var(--accent);
     color: var(--accent-fg);
     border-color: var(--accent);
+  }
+
+  /* Slim status bar: doc stats left, caret Ln:Col right (edit modes only). */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: none;
+    padding: 2px 10px;
+    font-size: 11px;
+    line-height: 1.6;
+    background: var(--panel);
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    user-select: none;
+  }
+  .statusbar .cursor {
+    font-variant-numeric: tabular-nums;
   }
 
   .body {
@@ -888,5 +868,28 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   }
   .body:not(.split) .editor-pane {
     border-right: none;
+  }
+
+  /* Full-window drop target hint. pointer-events:none so the drop itself
+     still lands on the window handler. */
+  .drop-hint {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: rgba(76, 141, 255, 0.1);
+    outline: 2px dashed #4c8dff;
+    outline-offset: -12px;
+  }
+  .drop-hint span {
+    padding: 8px 18px;
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid #4c8dff;
+    font-size: 14px;
   }
 </style>
