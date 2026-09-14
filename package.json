@@ -23,12 +23,15 @@
     "@codemirror/commands": "^6.7.1",
     "@codemirror/lang-markdown": "^6.3.1",
     "@codemirror/language": "^6.10.8",
+    "@codemirror/search": "^6.7.2",
     "@codemirror/state": "^6.5.1",
     "@codemirror/view": "^6.36.2",
     "@lezer/highlight": "^1.2.1",
     "codemirror": "^6.0.1",
     "diff": "^5.2.0",
     "highlight.js": "^11.11.1",
-    "markdown-it": "^14.1.0"
+    "katex": "^0.18.7",
+    "markdown-it": "^14.1.0",
+    "markdown-it-texmath": "^1.0.0"
   }
 }

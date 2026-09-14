@@ -1,5 +1,12 @@
 <script>
   import MarkdownIt from 'markdown-it';
+  import texmath from 'markdown-it-texmath';
+  import katex from 'katex';
+  // KaTeX CSS + fonts are bundled by vite into dist/, so math renders fully
+  // offline from the Neutralino resource bundle — no CDN involved.
+  import 'katex/dist/katex.min.css';
+  // texmath's own sliver: <eq>/<eqn> display rules + equation-number layout.
+  import 'markdown-it-texmath/css/texmath.css';
   import { onMount } from 'svelte';
   import { copyToClipboard, readImageDataUrl } from './neu.js';
   import { highlightCode } from './highlight.js';
@@ -16,6 +23,11 @@
   // single newline as <br>, so consecutive lines show as separate lines
   // instead of collapsing into one long paragraph.
   const md = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true });
+
+  // LaTeX math via KaTeX: $…$ and $$…$$ plus \(…\) / \[…\] delimiters.
+  // throwOnError:false keeps a broken formula as readable source text
+  // instead of exploding the whole render.
+  md.use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false } });
 
   // Fenced blocks render as: wrapper > (language tag + copy button) + <pre><code>.
   // The wrapper is what the copy button anchors to, and it stays a single

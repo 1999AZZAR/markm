@@ -8,6 +8,7 @@ import { EditorView, keymap, highlightActiveLine, lineNumbers } from '@codemirro
 import { EditorState } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+import { search, searchKeymap, highlightSelectionMatches } from '@codemirror/search';
 import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
 
@@ -36,6 +37,30 @@ const theme = EditorView.theme({
   '.cm-activeLine': { backgroundColor: 'var(--editor-active)' },
   '.cm-activeLineGutter': { backgroundColor: 'var(--editor-active)', color: 'var(--fg)' },
   '.cm-selectionMatch': { backgroundColor: 'var(--sel)' },
+  // Find/replace panel, theme-driven like everything else. The panel ships
+  // with near-zero base styling, so every control gets explicit treatment:
+  // bordered inputs, real buttons with hover + active toggle state, and
+  // accent-tinted checkboxes — all in small type to match the slim chrome.
+  '.cm-panels': { backgroundColor: 'var(--bg)', color: 'var(--fg)', borderTop: '1px solid var(--border)' },
+  '.cm-panel.cm-search': { padding: '5px 8px', fontSize: '12px' },
+  '.cm-panel.cm-search input.cm-textfield': {
+    backgroundColor: 'var(--editor-active)', color: 'var(--fg)',
+    border: '1px solid var(--border)', borderRadius: '5px', padding: '3px 7px',
+  },
+  '.cm-panel.cm-search input.cm-textfield:focus': { outline: 'none', borderColor: 'var(--accent)' },
+  '.cm-panel.cm-search button.cm-button': {
+    backgroundColor: 'transparent', color: 'var(--fg)',
+    border: '1px solid var(--border)', borderRadius: '5px', padding: '3px 9px',
+    marginLeft: '4px', cursor: 'pointer', fontSize: '12px',
+  },
+  '.cm-panel.cm-search button.cm-button:hover': { backgroundColor: 'var(--editor-active)' },
+  '.cm-panel.cm-search button.cm-button[aria-pressed="true"]': {
+    backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: 'var(--bg)',
+  },
+  '.cm-panel.cm-search label': { color: 'var(--muted)', marginLeft: '8px' },
+  '.cm-panel.cm-search input[type="checkbox"]': { accentColor: 'var(--accent)' },
+  '.cm-searchMatch': { backgroundColor: 'var(--sel)' },
+  '.cm-searchMatch-selected': { backgroundColor: 'var(--accent)', color: 'var(--bg)' },
 });
 
 /**
@@ -68,10 +93,15 @@ export function createEditor(parent, { doc = '', onChange, onCursor } = {}) {
       // transform, which otherwise throws off CodeMirror's own selection
       // coordinate measurement in WebKitGTK. Styled via `.cm-content ::selection`.
       highlightActiveLine(),
+      // Find/replace panel (Ctrl/Cmd+F, replace via Ctrl/Cmd+H) plus
+      // auto-highlight of all matches of the current selection.
+      // Panel pinned to the editor bottom, just above the status bar.
+      search({ top: false }),
+      highlightSelectionMatches(),
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage, codeLanguages: [] }),
       syntaxHighlighting(highlight),
-      keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+      keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap, indentWithTab]),
       theme,
       listener,
     ],

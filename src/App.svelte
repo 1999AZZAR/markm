@@ -249,8 +249,12 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
       } else {
         el.style.transformOrigin = '0 0';
         el.style.transform = `scale(${zoom})`;
-        el.style.width = `${100 / zoom}%`;
-        el.style.height = `${100 / zoom}%`;
+        // +2px overscan: at fractional zoom WebKitGTK's subpixel rounding can
+        // leave a hairline gap between the surface edge and the chrome
+        // (visible e.g. below the editor/search panel at 80-90%). The
+        // workspace clips overflow, so the extra pixels are never seen.
+        el.style.width = `calc(${100 / zoom}% + 2px)`;
+        el.style.height = `calc(${100 / zoom}% + 2px)`;
       }
     }
     saveSetting('zoom', String(zoom));
@@ -671,8 +675,8 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 3px 10px;
+    gap: 8px;
+    padding: 2px 10px;
     background: var(--panel);
     color: var(--panel-fg);
     border-bottom: 1px solid var(--border);
@@ -683,7 +687,7 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   .file {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     min-width: 0;
     flex: 0 1 auto;
   }
@@ -698,7 +702,7 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: 11px;
   }
   .dot {
     width: 8px;
@@ -719,8 +723,8 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   }
 
   .icon {
-    padding: 0 9px;
-    font-size: 14px;
+    padding: 0 7px;
+    font-size: 12px;
     line-height: 1;
     flex: none;
   }
@@ -730,16 +734,16 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     border-color: var(--accent);
   }
   .reveal {
-    height: 20px;
+    height: 18px;
     padding: 0 6px;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--muted);
   }
 
   .actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex: none;
     justify-content: flex-end;
   }
@@ -767,7 +771,7 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--muted);
   }
   .menu select {
@@ -775,29 +779,29 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   }
 
   /* All toolbar controls share one height so buttons and the native select
-     line up exactly. */
+     line up exactly. Sized to echo the slim status bar (11px type). */
   button,
   select {
     font: inherit;
-    font-size: 12px;
-    height: 26px;
+    font-size: 11px;
+    height: 22px;
     box-sizing: border-box;
-    padding: 0 10px;
+    padding: 0 8px;
     line-height: normal;
     background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 5px;
     cursor: pointer;
   }
 
   .modes {
     display: flex;
     align-items: stretch;
-    height: 26px;
+    height: 22px;
     box-sizing: border-box;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 5px;
     overflow: hidden;
   }
   .modes button {
@@ -807,13 +811,13 @@ markm is open source ([MIT](https://github.com/galvani/markm)) — built by
   }
   .modes button {
     border-right: 1px solid var(--border);
-    padding: 0 11px;
+    padding: 0 9px;
     display: flex;
     align-items: center;
   }
   .modes svg {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     fill: none;
     stroke: currentColor;
     stroke-width: 1.7;
